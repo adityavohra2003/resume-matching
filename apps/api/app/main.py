@@ -1,26 +1,24 @@
 import os
-from fastapi import FastAPI
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, UploadFile, File, HTTPException
 import psycopg2
 import redis
 
-app = FastAPI(title="Resume Matching API", version="0.0.2")
+from app.db import get_conn, init_db
+
+app = FastAPI(title="Resume Matching API", version="0.1.0")
 
 
+# --- Readiness checks (Phase 0.5) ---
 def check_postgres() -> None:
-    conn = psycopg2.connect(
-        host=os.getenv("DATABASE_HOST", "postgres"),
-        port=int(os.getenv("DATABASE_PORT", "5432")),
-        dbname=os.getenv("DATABASE_NAME", "resume_db"),
-        user=os.getenv("DATABASE_USER", "app"),
-        password=os.getenv("DATABASE_PASSWORD", "app"),
-        connect_timeout=2,
-    )
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT 1;")
     cur.fetchone()
     cur.close()
     conn.close()
-
 
 def check_redis() -> None:
     r = redis.Redis(
@@ -33,6 +31,12 @@ def check_redis() -> None:
     r.ping()
 
 
+@app.on_event("startup")
+def on_startup():
+    # Create tables if not present
+    init_db()
+
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
@@ -41,7 +45,6 @@ def healthz():
 @app.get("/readyz")
 def readyz():
     errors = {}
-
     try:
         check_postgres()
     except Exception as e:
@@ -53,7 +56,83 @@ def readyz():
         errors["redis"] = str(e)
 
     if errors:
-        # 503 is standard for "not ready"
         return {"status": "not_ready", "errors": errors}
 
     return {"status": "ready"}
+
+
+# --- Phase 1.0: Ingestion ---
+@app.post("/resumes")
+async def upload_resume(file: UploadFile = File(...)):
+    # Basic validation
+    if file.filename is None or file.filename.strip() == "":
+        raise HTTPException(status_code=400, detail="Missing filename")
+
+    allowed = {
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
+        "application/msword",  # doc
+    }
+    # Some browsers may send octet-stream; we won’t hard fail, but we record it.
+    content_type = file.content_type
+
+    resume_id = uuid.uuid4()
+    upload_dir = Path(os.getenv("UPLOAD_DIR", "/data")) / "resumes"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = file.filename.replace("/", "_").replace("\\", "_")
+    storage_path = upload_dir / f"{resume_id}_{safe_name}"
+
+    # Save file to disk
+    data = await file.read()
+    storage_path.write_bytes(data)
+
+    # Store metadata in Postgres
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO resumes (id, filename, content_type, storage_path, status)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (str(resume_id), safe_name, content_type, str(storage_path), "UPLOADED"),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {
+        "resume_id": str(resume_id),
+        "filename": safe_name,
+        "content_type": content_type,
+        "status": "UPLOADED",
+    }
+
+
+@app.get("/resumes/{resume_id}")
+def get_resume(resume_id: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, filename, content_type, storage_path, status, created_at
+        FROM resumes
+        WHERE id = %s
+        """,
+        (resume_id,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Resume not found")
+
+    return {
+        "id": str(row[0]),
+        "filename": row[1],
+        "content_type": row[2],
+        "storage_path": row[3],
+        "status": row[4],
+        "created_at": row[5].isoformat(),
+    }

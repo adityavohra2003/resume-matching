@@ -12,6 +12,8 @@ services:
       DATABASE_PASSWORD: app
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+    volumes:
+      - ../data:/data
     depends_on:
       - postgres
       - redis
