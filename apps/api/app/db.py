@@ -14,6 +14,8 @@ def get_conn():
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
+
+    # Resumes table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS resumes (
             id UUID PRIMARY KEY,
@@ -24,6 +26,19 @@ def init_db():
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
     """)
+
+    # Job descriptions table
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS job_descriptions (
+            id UUID PRIMARY KEY,
+            title TEXT,
+            content TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
+

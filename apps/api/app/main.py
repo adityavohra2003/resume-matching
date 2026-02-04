@@ -7,8 +7,14 @@ import psycopg2
 import redis
 
 from app.db import get_conn, init_db
+from pydantic import BaseModel
+from typing import Optional
+
 
 app = FastAPI(title="Resume Matching API", version="0.1.0")
+class JobDescriptionCreate(BaseModel):
+    title: Optional[str] = None
+    content: str
 
 
 # --- Readiness checks (Phase 0.5) ---
@@ -135,4 +141,56 @@ def get_resume(resume_id: str):
         "storage_path": row[3],
         "status": row[4],
         "created_at": row[5].isoformat(),
+    }
+
+# --- Phase 1.1: Job Descriptions ---
+@app.post("/job-descriptions")
+def create_job_description(payload: JobDescriptionCreate):
+    jd_id = uuid.uuid4()
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO job_descriptions (id, title, content, status)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (str(jd_id), payload.title, payload.content, "CREATED"),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {
+        "jd_id": str(jd_id),
+        "title": payload.title,
+        "status": "CREATED",
+    }
+
+
+@app.get("/job-descriptions/{jd_id}")
+def get_job_description(jd_id: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, content, status, created_at
+        FROM job_descriptions
+        WHERE id = %s
+        """,
+        (jd_id,),
+    )
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Job description not found")
+
+    return {
+        "id": str(row[0]),
+        "title": row[1],
+        "content": row[2],
+        "status": row[3],
+        "created_at": row[4].isoformat(),
     }
