@@ -1,23 +1,25 @@
 import os
 import uuid
 from pathlib import Path
+from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
-import psycopg2
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from pydantic import BaseModel
 import redis
 
 from app.db import get_conn, init_db
-from pydantic import BaseModel
-from typing import Optional
+from app.extractors import extract_text
 
 
-app = FastAPI(title="Resume Matching API", version="0.1.0")
+app = FastAPI(title="Resume Matching API", version="0.2.0")
+
+
 class JobDescriptionCreate(BaseModel):
     title: Optional[str] = None
     content: str
 
 
-# --- Readiness checks (Phase 0.5) ---
+# ---------- Phase 0.5: Readiness checks ----------
 def check_postgres() -> None:
     conn = get_conn()
     cur = conn.cursor()
@@ -25,6 +27,7 @@ def check_postgres() -> None:
     cur.fetchone()
     cur.close()
     conn.close()
+
 
 def check_redis() -> None:
     r = redis.Redis(
@@ -39,7 +42,6 @@ def check_redis() -> None:
 
 @app.on_event("startup")
 def on_startup():
-    # Create tables if not present
     init_db()
 
 
@@ -67,22 +69,57 @@ def readyz():
     return {"status": "ready"}
 
 
-# --- Phase 1.0: Ingestion ---
+# ---------- Phase 2A helpers (Background processing, no OCR) ----------
+def set_status(resume_id: str, status: str, raw_text: str | None = None):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if raw_text is None:
+        cur.execute(
+            "UPDATE resumes SET status=%s, updated_at=NOW() WHERE id=%s",
+            (status, resume_id),
+        )
+    else:
+        cur.execute(
+            "UPDATE resumes SET status=%s, raw_text=%s, updated_at=NOW() WHERE id=%s",
+            (status, raw_text, resume_id),
+        )
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def process_resume_text(resume_id: str, storage_path: str):
+    """
+    Runs in background (FastAPI BackgroundTasks).
+    Extracts text from PDF/DOCX text layer (no OCR) and stores in DB.
+    """
+    try:
+        set_status(resume_id, "PROCESSING")
+
+        text = extract_text(Path(storage_path))
+
+        # If tiny text, likely scanned PDF -> mark for OCR later (but we don't do OCR now)
+        if len(text.strip()) < 200:
+            set_status(resume_id, "NEEDS_OCR", text)
+            return
+
+        set_status(resume_id, "PROCESSED", text)
+
+    except Exception as e:
+        set_status(resume_id, "FAILED", f"ERROR: {e}")
+
+
+# ---------- Phase 1.0: Resume ingestion ----------
 @app.post("/resumes")
-async def upload_resume(file: UploadFile = File(...)):
-    # Basic validation
+async def upload_resume(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     if file.filename is None or file.filename.strip() == "":
         raise HTTPException(status_code=400, detail="Missing filename")
 
-    allowed = {
-        "application/pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
-        "application/msword",  # doc
-    }
-    # Some browsers may send octet-stream; we won’t hard fail, but we record it.
     content_type = file.content_type
-
     resume_id = uuid.uuid4()
+
     upload_dir = Path(os.getenv("UPLOAD_DIR", "/data")) / "resumes"
     upload_dir.mkdir(parents=True, exist_ok=True)
 
@@ -107,6 +144,9 @@ async def upload_resume(file: UploadFile = File(...)):
     cur.close()
     conn.close()
 
+    # ✅ Phase 2A: kick off background extraction
+    background_tasks.add_task(process_resume_text, str(resume_id), str(storage_path))
+
     return {
         "resume_id": str(resume_id),
         "filename": safe_name,
@@ -121,7 +161,7 @@ def get_resume(resume_id: str):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, filename, content_type, storage_path, status, created_at
+        SELECT id, filename, content_type, storage_path, status, created_at, updated_at
         FROM resumes
         WHERE id = %s
         """,
@@ -141,9 +181,26 @@ def get_resume(resume_id: str):
         "storage_path": row[3],
         "status": row[4],
         "created_at": row[5].isoformat(),
+        "updated_at": row[6].isoformat() if row[6] else None,
     }
 
-# --- Phase 1.1: Job Descriptions ---
+
+@app.get("/resumes/{resume_id}/text")
+def get_resume_text(resume_id: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT status, raw_text FROM resumes WHERE id=%s", (resume_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Resume not found")
+
+    return {"id": resume_id, "status": row[0], "raw_text": row[1]}
+
+
+# ---------- Phase 1.1: Job Descriptions ----------
 @app.post("/job-descriptions")
 def create_job_description(payload: JobDescriptionCreate):
     jd_id = uuid.uuid4()
@@ -161,11 +218,7 @@ def create_job_description(payload: JobDescriptionCreate):
     cur.close()
     conn.close()
 
-    return {
-        "jd_id": str(jd_id),
-        "title": payload.title,
-        "status": "CREATED",
-    }
+    return {"jd_id": str(jd_id), "title": payload.title, "status": "CREATED"}
 
 
 @app.get("/job-descriptions/{jd_id}")

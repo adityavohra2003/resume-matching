@@ -15,6 +15,10 @@ def init_db():
     conn = get_conn()
     cur = conn.cursor()
 
+    cur.execute("ALTER TABLE resumes ADD COLUMN IF NOT EXISTS raw_text TEXT;")
+    cur.execute("ALTER TABLE resumes ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();")
+
+
     # Resumes table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS resumes (
@@ -23,7 +27,9 @@ def init_db():
             content_type TEXT,
             storage_path TEXT NOT NULL,
             status TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            raw_text TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
     """)
 
