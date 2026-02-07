@@ -3,13 +3,15 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
-from pydantic import BaseModel
 import redis
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from pydantic import BaseModel
+from psycopg2.extras import Json
 
 from app.db import get_conn, init_db
+from app.embeddings import embed_text
 from app.extractors import extract_text
-
+from app.parser import parse_resume
 
 app = FastAPI(title="Resume Matching API", version="0.2.0")
 
@@ -69,8 +71,8 @@ def readyz():
     return {"status": "ready"}
 
 
-# ---------- Phase 2A helpers (Background processing, no OCR) ----------
-def set_status(resume_id: str, status: str, raw_text: str | None = None):
+# ---------- Phase 2 + Phase 3 helpers ----------
+def set_status(resume_id: str, status: str, raw_text: str | None = None) -> None:
     conn = get_conn()
     cur = conn.cursor()
 
@@ -90,24 +92,68 @@ def set_status(resume_id: str, status: str, raw_text: str | None = None):
     conn.close()
 
 
-def process_resume_text(resume_id: str, storage_path: str):
+def clean_text_basic(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def set_phase3_outputs(
+    resume_id: str,
+    clean_text: str,
+    parsed_json: dict,
+    embedding: list[float],
+    embedding_model: str,
+) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE resumes
+        SET status=%s,
+            clean_text=%s,
+            parsed_json=%s,
+            embedding=%s,
+            embedding_model=%s,
+            updated_at=NOW()
+        WHERE id=%s
+        """,
+        ("PROCESSED", clean_text, Json(parsed_json), embedding, embedding_model, resume_id),
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def process_resume_text(resume_id: str, storage_path: str) -> None:
     """
     Runs in background (FastAPI BackgroundTasks).
-    Extracts text from PDF/DOCX text layer (no OCR) and stores in DB.
+    Phase 2: Extract text (no OCR)
+    Phase 3: Clean + Parse (existing parser.py) + Embed + Store
     """
     try:
+        print(f"[bg] started process_resume_text resume_id={resume_id}")
+
         set_status(resume_id, "PROCESSING")
 
         text = extract_text(Path(storage_path))
 
         # If tiny text, likely scanned PDF -> mark for OCR later (but we don't do OCR now)
-        if len(text.strip()) < 200:
+        if len((text or "").strip()) < 200:
             set_status(resume_id, "NEEDS_OCR", text)
             return
 
-        set_status(resume_id, "PROCESSED", text)
+        # store extracted text (Phase 2 output)
+        set_status(resume_id, "EXTRACTED", text)
+
+        # -------- Phase 3 --------
+        clean = clean_text_basic(text)
+        parsed = parse_resume(clean)  # DO NOT CHANGE NLP PART
+        embedding = embed_text(clean)
+        embedding_model = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+
+        set_phase3_outputs(resume_id, clean, parsed, embedding, embedding_model)
 
     except Exception as e:
+        print(f"[bg] ERROR resume_id={resume_id}: {repr(e)}")
         set_status(resume_id, "FAILED", f"ERROR: {e}")
 
 
@@ -144,7 +190,7 @@ async def upload_resume(background_tasks: BackgroundTasks, file: UploadFile = Fi
     cur.close()
     conn.close()
 
-    # ✅ Phase 2A: kick off background extraction
+    # Kick off background extraction + Phase 3 processing
     background_tasks.add_task(process_resume_text, str(resume_id), str(storage_path))
 
     return {
@@ -161,7 +207,8 @@ def get_resume(resume_id: str):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, filename, content_type, storage_path, status, created_at, updated_at
+        SELECT id, filename, content_type, storage_path, status,
+               created_at, updated_at, clean_text, parsed_json, embedding_model
         FROM resumes
         WHERE id = %s
         """,
@@ -182,6 +229,9 @@ def get_resume(resume_id: str):
         "status": row[4],
         "created_at": row[5].isoformat(),
         "updated_at": row[6].isoformat() if row[6] else None,
+        "clean_text": row[7],
+        "parsed_json": row[8],
+        "embedding_model": row[9],
     }
 
 
@@ -205,14 +255,18 @@ def get_resume_text(resume_id: str):
 def create_job_description(payload: JobDescriptionCreate):
     jd_id = uuid.uuid4()
 
+    clean = clean_text_basic(payload.content)
+    embedding = embed_text(clean)
+    embedding_model = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO job_descriptions (id, title, content, status)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO job_descriptions (id, title, content, status, clean_text, embedding, embedding_model)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         """,
-        (str(jd_id), payload.title, payload.content, "CREATED"),
+        (str(jd_id), payload.title, payload.content, "CREATED", clean, embedding, embedding_model),
     )
     conn.commit()
     cur.close()
@@ -227,7 +281,7 @@ def get_job_description(jd_id: str):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, title, content, status, created_at
+        SELECT id, title, content, status, created_at, embedding_model
         FROM job_descriptions
         WHERE id = %s
         """,
@@ -246,4 +300,5 @@ def get_job_description(jd_id: str):
         "content": row[2],
         "status": row[3],
         "created_at": row[4].isoformat(),
+        "embedding_model": row[5],
     }

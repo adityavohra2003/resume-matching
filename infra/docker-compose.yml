@@ -12,6 +12,9 @@ services:
       DATABASE_PASSWORD: app
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+      EMBEDDING_MODEL_NAME: all-MiniLM-L6-v2
+      EMBEDDING_DIM: "384"
+
     volumes:
       - ../data:/data
     depends_on:
@@ -19,7 +22,7 @@ services:
       - redis
 
   postgres:
-    image: postgres:16
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: app
       POSTGRES_PASSWORD: app
