@@ -12,8 +12,13 @@ from app.db import get_conn, init_db
 from app.embeddings import embed_text
 from app.extractors import extract_text
 from app.parser import parse_resume
+from app.routes_match import router as match_router
+
+
 
 app = FastAPI(title="Resume Matching API", version="0.2.0")
+app.include_router(match_router)
+
 
 
 class JobDescriptionCreate(BaseModel):

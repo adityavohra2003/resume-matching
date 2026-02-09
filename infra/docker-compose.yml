@@ -14,12 +14,19 @@ services:
       REDIS_PORT: "6379"
       EMBEDDING_MODEL_NAME: all-MiniLM-L6-v2
       EMBEDDING_DIM: "384"
-
     volumes:
       - ../data:/data
     depends_on:
       - postgres
       - redis
+
+  ui:
+    build:
+      context: ../apps/ui
+    depends_on:
+      - api
+    ports:
+      - "8501:8501"
 
   postgres:
     image: pgvector/pgvector:pg16
