@@ -1,11 +1,21 @@
-# resume-matching
+# Resume ↔ Job Description Matching System (ATS-style, Explainable)
 
-Phase 0:
-Implemented health (/healthz) and readiness (/readyz) probes with live dependency checks for PostgreSQL and Redis.
+Production-style resume screening platform that ingests resumes asynchronously, extracts and parses text, generates embeddings, stores everything in Postgres + pgvector, and returns **ranked + explainable** matches for a given job description.
 
-Phase 1: Phase 1.0 deliverables (small, safe)
-Create DB tables:
-resumes (id, filename, status, created_at)
-Add endpoint:
-POST /resumes → accepts file upload, stores metadata in DB (for now, store file locally)
-GET /resumes/{id} → returns stored metadata
+## Features
+- **FastAPI** backend (Swagger docs at `/docs`)
+- **Docker Compose** local stack
+- **Postgres + pgvector** for embedding storage + vector similarity search
+- **Redis** available for async patterns (currently used for readiness check)
+- **Async resume processing** using FastAPI `BackgroundTasks` (API never blocks)
+- **Text extraction** from PDF/DOCX (OCR intentionally not implemented yet)
+- **Explainable matching**:
+  - semantic similarity (embeddings)
+  - skills overlap (keyword-based)
+  - experience alignment (simple heuristic)
+- **Minimal Streamlit UI** to demo upload → JD → match
+
+---
+
+## Architecture (Local)
+
