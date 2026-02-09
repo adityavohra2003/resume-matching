@@ -15,7 +15,4 @@ Production-style resume screening platform that ingests resumes asynchronously, 
   - experience alignment (simple heuristic)
 - **Minimal Streamlit UI** to demo upload → JD → match
 
----
-
-## Architecture (Local)
 
